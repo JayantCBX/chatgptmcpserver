@@ -1,0 +1,16 @@
+{
+  "name": "google-search-console-ga4-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.1",
+    "express": "^4.21.2",
+    "googleapis": "^157.0.0",
+    "zod": "^3.24.2"
+  }
+}

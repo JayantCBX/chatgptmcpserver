@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/mcp",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/auth/google/start",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/auth/google/callback",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/oauth/token",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/.well-known/oauth-authorization-server",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/.well-known/oauth-protected-resource",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/",
+      "destination": "/api/index.js"
+    }
+  ]
+}
