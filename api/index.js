@@ -30,6 +30,7 @@ function requireEnv(name) {
 
 function getBaseUrl(req) {
   return process.env.APP_BASE_URL || process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
+  return String(raw).replace(/\/+$/, "");
 }
 
 function getResourceUrl(req) {
