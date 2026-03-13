@@ -88,5 +88,7 @@ npm start
 ## Notes
 
 - This server keeps OAuth state stateless by encrypting authorization codes and Vercel-issued access and refresh tokens instead of storing them in a database.
+- Keep `APP_ENCRYPTION_KEY` or `SESSION_SECRET` stable across deploys so sessions and tokens remain decryptable.
 - `/mcp` validates only Vercel-issued MCP bearer tokens. It does not accept raw Google tokens directly.
 - Those Vercel-issued tokens include issuer, resource, scope, expiry, and the Google credentials needed for downstream API calls.
+- The current server-side session store is in-process memory. For stronger persistence across cold starts and regions on Vercel, move session storage to a durable store such as Redis or Vercel KV.

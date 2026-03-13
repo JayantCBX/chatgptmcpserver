@@ -9,8 +9,9 @@ const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonl
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE];
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
-const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const TOOL_SCOPE_MAP = {
   list_search_console_sites: [SEARCH_CONSOLE_SCOPE],
@@ -18,6 +19,8 @@ const TOOL_SCOPE_MAP = {
   list_ga4_properties: [GA4_SCOPE],
   run_ga4_report: [GA4_SCOPE]
 };
+const sessionStore = globalThis.__googleMcpSessionStore || new Map();
+globalThis.__googleMcpSessionStore = sessionStore;
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -162,16 +165,40 @@ function extractBearerToken(req) {
   return authHeader.slice("Bearer ".length);
 }
 
+function saveSession(sessionId, session) {
+  const record = {
+    ...session,
+    updatedAt: Date.now(),
+    sessionExpiresAt: session.sessionExpiresAt || Date.now() + SESSION_TTL_MS
+  };
+  sessionStore.set(sessionId, record);
+  return record;
+}
+
+function getSession(sessionId) {
+  const session = sessionStore.get(sessionId);
+  if (!session) return null;
+  if (session.sessionExpiresAt && Number(session.sessionExpiresAt) <= Date.now()) {
+    sessionStore.delete(sessionId);
+    return null;
+  }
+  return session;
+}
+
+function deleteSession(sessionId) {
+  sessionStore.delete(sessionId);
+}
+
 function mintAccessToken(req, payload) {
   return encryptJson({
     typ: "mcp_access_token",
     iss: getBaseUrl(req),
     aud: payload.resource,
     resource: payload.resource,
+    sessionId: payload.sessionId,
     scope: payload.scope,
     iat: Date.now(),
-    exp: Date.now() + ACCESS_TOKEN_TTL_MS,
-    google: payload.google
+    exp: Date.now() + ACCESS_TOKEN_TTL_MS
   });
 }
 
@@ -181,6 +208,7 @@ function mintRefreshToken(req, payload) {
     iss: getBaseUrl(req),
     aud: payload.resource,
     resource: payload.resource,
+    sessionId: payload.sessionId,
     scope: payload.scope,
     iat: Date.now(),
     exp: Date.now() + REFRESH_TOKEN_TTL_MS,
@@ -197,30 +225,34 @@ function getRequestedResource(req, fallback) {
   return requested ? String(requested) : fallback;
 }
 
-async function refreshGoogleTokensIfNeeded(req, googleTokenBundle) {
-  if (!googleTokenBundle?.refreshToken) {
+async function refreshGoogleTokensIfNeeded(req, session) {
+  if (!session?.refreshToken) {
     throw buildAuthError({
       httpStatus: 401,
       error: "invalid_token",
-      errorDescription: "Token is missing Google refresh credentials.",
-      details: { debug: "missing_google_refresh_token" }
+      errorDescription: "No valid session.",
+      details: { debug: "no_valid_session" }
     });
   }
-  const expiresAt = Number(googleTokenBundle.expiryDate || 0);
-  const isFresh = googleTokenBundle.accessToken && expiresAt && expiresAt - Date.now() > 60_000;
-  if (isFresh) return googleTokenBundle;
+  const expiresAt = Number(session.expiryDate || 0);
+  const isFresh = session.accessToken && expiresAt && expiresAt - Date.now() > 60_000;
+  if (isFresh) return session;
   const oauthClient = createOauthClient(req);
-  oauthClient.setCredentials({ refresh_token: googleTokenBundle.refreshToken });
+  oauthClient.setCredentials({ refresh_token: session.refreshToken });
   try {
     const { credentials } = await oauthClient.refreshAccessToken();
-    return {
+    return saveSession(session.sessionId, {
+      ...session,
       accessToken: credentials.access_token,
-      refreshToken: googleTokenBundle.refreshToken,
+      refreshToken: session.refreshToken,
       expiryDate: credentials.expiry_date,
-      scope: credentials.scope || googleTokenBundle.scope,
-      tokenType: credentials.token_type || googleTokenBundle.tokenType || "Bearer"
-    };
+      scope: credentials.scope || session.scope,
+      tokenType: credentials.token_type || session.tokenType || "Bearer"
+    });
   } catch (error) {
+    if (session.sessionId) {
+      deleteSession(session.sessionId);
+    }
     throw buildAuthError({
       httpStatus: 401,
       error: "invalid_token",
@@ -279,7 +311,17 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       details: { debug: "expired_token", expired_at: payload.exp || null }
     });
   }
-  const grantedScopes = normalizeScopes(payload.scope);
+  const sessionId = payload.sessionId;
+  const session = sessionId ? getSession(sessionId) : null;
+  if (!session) {
+    throw buildAuthError({
+      httpStatus: 401,
+      error: "invalid_token",
+      errorDescription: "No valid session.",
+      details: { debug: "no_valid_session" }
+    });
+  }
+  const grantedScopes = normalizeScopes(session.scope || payload.scope);
   if (!hasScopes(grantedScopes, requiredScopes)) {
     throw buildAuthError({
       httpStatus: 403,
@@ -288,13 +330,14 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       details: { debug: "missing_scopes", required_scopes: requiredScopes, granted_scopes: grantedScopes }
     });
   }
-  const googleCredentials = await refreshGoogleTokensIfNeeded(req, payload.google);
+  const googleCredentials = await refreshGoogleTokensIfNeeded(req, session);
   req.mcpAuth = {
     issuer,
     resource,
     scope: grantedScopes.join(" "),
     scopes: grantedScopes,
     googleCredentials,
+    sessionId,
     verifiedScopesKey: requiredScopes.join(" ")
   };
   return req.mcpAuth;
@@ -325,11 +368,12 @@ async function callGoogleApi(url, accessToken, options = {}) {
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
-function buildToolResult(payload, isError = false) {
+function buildToolResult(payload, isError = false, meta) {
   return {
     content: [{ type: "text", text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2) }],
     ...(payload && typeof payload === "object" ? { structuredContent: payload } : {}),
-    ...(isError ? { isError: true } : {})
+    ...(isError ? { isError: true } : {}),
+    ...(meta ? { _meta: meta } : {})
   };
 }
 
@@ -342,12 +386,20 @@ function toToolErrorPayload(error) {
   return { error: "tool_execution_failed", error_description: error instanceof Error ? error.message : String(error) };
 }
 
+function shouldEmitAuthChallenge(error) {
+  return ["missing_authorization_header", "bad_authorization_scheme", "no_valid_session", "google_refresh_failed", "missing_scopes"].includes(error?.details?.debug);
+}
+
 async function withVerifiedToolAuth(req, requiredScopes, handler) {
   try {
     const auth = await verifyMcpAccessToken(req, requiredScopes);
     return await handler(auth);
   } catch (error) {
-    return buildToolResult(toToolErrorPayload(error), true);
+    return buildToolResult(
+      toToolErrorPayload(error),
+      true,
+      shouldEmitAuthChallenge(error) ? { "mcp/www_authenticate": getAuthenticateHeader(error) } : undefined
+    );
   }
 }
 
@@ -622,11 +674,23 @@ app.get("/auth/google/callback", async (req, res) => {
     }
 
     const grantedScopes = normalizeScopes(tokens.scope || appState.scope);
+    const sessionId = crypto.randomUUID();
+    saveSession(sessionId, {
+      sessionId,
+      refreshToken: tokens.refresh_token,
+      accessToken: tokens.access_token,
+      expiryDate: tokens.expiry_date,
+      scope: tokens.scope || grantedScopes.join(" "),
+      tokenType: tokens.token_type || "Bearer",
+      sessionExpiresAt: Date.now() + SESSION_TTL_MS
+    });
+
     const authCode = encryptJson({
       typ: "mcp_authorization_code",
       iss: getBaseUrl(req),
       aud: appState.resource,
       resource: appState.resource,
+      sessionId,
       scope: grantedScopes.join(" "),
       codeChallenge: appState.codeChallenge,
       codeChallengeMethod: appState.codeChallengeMethod,
@@ -712,15 +776,28 @@ app.post("/oauth/token", async (req, res) => {
         });
       }
 
+      const sessionId = payload.sessionId || crypto.randomUUID();
+      const session = saveSession(sessionId, {
+        sessionId,
+        refreshToken: payload.google.refreshToken,
+        accessToken: payload.google.accessToken,
+        expiryDate: payload.google.expiryDate,
+        scope: payload.google.scope || payload.scope,
+        tokenType: payload.google.tokenType || "Bearer",
+        sessionExpiresAt: Date.now() + SESSION_TTL_MS
+      });
+
       const accessToken = mintAccessToken(req, {
+        sessionId,
         resource: payload.resource,
         scope: payload.scope,
-        google: payload.google
+        google: session
       });
       const newRefreshToken = mintRefreshToken(req, {
+        sessionId,
         resource: payload.resource,
         scope: payload.scope,
-        google: payload.google
+        google: session
       });
 
       return res.json({
@@ -771,21 +848,38 @@ app.post("/oauth/token", async (req, res) => {
         });
       }
 
-      const refreshed = await exchangeGoogleRefreshToken(req, payload.google.refreshToken);
-      const grantedScopes = normalizeScopes(refreshed.scope || payload.scope);
-      const googleCredentials = {
-        accessToken: refreshed.access_token,
+      const sessionId = payload.sessionId || crypto.randomUUID();
+      const existingSession = getSession(sessionId);
+      const session = existingSession || saveSession(sessionId, {
+        sessionId,
         refreshToken: payload.google.refreshToken,
+        accessToken: null,
+        expiryDate: 0,
+        scope: payload.google.scope || payload.scope,
+        tokenType: payload.google.tokenType || "Bearer",
+        sessionExpiresAt: Date.now() + SESSION_TTL_MS
+      });
+
+      const refreshed = await exchangeGoogleRefreshToken(req, session.refreshToken);
+      const grantedScopes = normalizeScopes(refreshed.scope || payload.scope);
+      const googleCredentials = saveSession(sessionId, {
+        ...session,
+        sessionId,
+        accessToken: refreshed.access_token,
+        refreshToken: session.refreshToken,
         expiryDate: refreshed.expiry_date,
-        scope: refreshed.scope || payload.google.scope || payload.scope,
-        tokenType: refreshed.token_type || payload.google.tokenType || "Bearer"
-      };
+        scope: refreshed.scope || session.scope || payload.scope,
+        tokenType: refreshed.token_type || session.tokenType || "Bearer",
+        sessionExpiresAt: Date.now() + SESSION_TTL_MS
+      });
       const accessToken = mintAccessToken(req, {
+        sessionId,
         resource: payload.resource,
         scope: grantedScopes.join(" "),
         google: googleCredentials
       });
       const newRefreshToken = mintRefreshToken(req, {
+        sessionId,
         resource: payload.resource,
         scope: grantedScopes.join(" "),
         google: googleCredentials
@@ -845,11 +939,6 @@ app.all("/mcp", async (req, res) => {
   const server = createServer(req);
 
   try {
-    if (isToolCall(req.body)) {
-      const requiredScopes = TOOL_SCOPE_MAP[req.body.params.name] || [];
-      await verifyMcpAccessToken(req, requiredScopes);
-    }
-
     res.on("close", () => {
       transport.close().catch(() => {});
       server.close().catch(() => {});
@@ -859,18 +948,11 @@ app.all("/mcp", async (req, res) => {
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
     const statusCode = error?.statusCode || 500;
-    if (error?.oauthError) {
-      res.setHeader("WWW-Authenticate", getAuthenticateHeader(error));
-    } else if (statusCode === 401) {
-      res.setHeader("WWW-Authenticate", 'Bearer realm="mcp", error="invalid_token"');
-    }
-
     if (!res.headersSent) {
-      res.status(statusCode).json(
-        error?.oauthError
-          ? formatAuthErrorResponse(error)
-          : { error: "mcp_request_failed", details: error instanceof Error ? error.message : String(error) }
-      );
+      res.status(statusCode).json({
+        error: "mcp_request_failed",
+        details: error instanceof Error ? error.message : String(error)
+      });
     }
   }
 });
