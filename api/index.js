@@ -26,7 +26,7 @@ function requireEnv(name) {
 }
 
 function getBaseUrl(req) {
-  return process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+  return process.env.APP_BASE_URL || process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
 }
 
 function getResourceUrl(req) {
@@ -34,9 +34,19 @@ function getResourceUrl(req) {
 }
 
 function getEncryptionKey() {
-  const key = Buffer.from(requireEnv("APP_ENCRYPTION_KEY"), "base64");
-  if (key.length !== 32) throw new Error("APP_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
-  return key;
+  const encodedKey = process.env.APP_ENCRYPTION_KEY;
+  if (encodedKey) {
+    const key = Buffer.from(encodedKey, "base64");
+    if (key.length !== 32) throw new Error("APP_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
+    return key;
+  }
+
+  const sessionSecret = process.env.SESSION_SECRET;
+  if (sessionSecret) {
+    return crypto.createHash("sha256").update(sessionSecret).digest();
+  }
+
+  throw new Error("Missing required environment variable: APP_ENCRYPTION_KEY or SESSION_SECRET");
 }
 
 function base64UrlEncode(value) {
@@ -76,6 +86,10 @@ function createOauthClient(req) {
     requireEnv("GOOGLE_CLIENT_SECRET"),
     `${getBaseUrl(req)}/auth/google/callback`
   );
+}
+
+function logAuthRouteDebug(payload) {
+  console.log(JSON.stringify({ type: "auth_route_debug", ...payload }));
 }
 
 function normalizePropertyName(propertyId) {
@@ -525,30 +539,66 @@ app.get("/", (req, res) => {
 });
 
 app.get("/auth/google/start", (req, res) => {
-  const oauthClient = createOauthClient(req);
-  const requestedScopes = normalizeScopes(req.query.scope);
-  const resource = getRequestedResource(req, getResourceUrl(req));
-  const appState = {
-    returnTo: req.query.return_to || "/",
-    clientRedirectUri: req.query.redirect_uri || null,
-    clientState: req.query.state || null,
-    codeChallenge: req.query.code_challenge || null,
-    codeChallengeMethod: req.query.code_challenge_method || "S256",
-    scope: requestedScopes.join(" "),
-    resource,
-    audience: resource,
-    issuedAt: Date.now()
-  };
+  try {
+    logAuthRouteDebug({
+      route: "/auth/google/start",
+      env_present: {
+        GOOGLE_CLIENT_ID: Boolean(process.env.GOOGLE_CLIENT_ID),
+        GOOGLE_CLIENT_SECRET: Boolean(process.env.GOOGLE_CLIENT_SECRET),
+        BASE_URL: Boolean(process.env.BASE_URL),
+        APP_BASE_URL: Boolean(process.env.APP_BASE_URL),
+        SESSION_SECRET: Boolean(process.env.SESSION_SECRET),
+        APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY)
+      }
+    });
 
-  const googleAuthUrl = oauthClient.generateAuthUrl({
-    access_type: "offline",
-    scope: GOOGLE_SCOPES,
-    include_granted_scopes: true,
-    prompt: "consent",
-    state: encryptJson(appState)
-  });
+    const computedRedirectUri = `${getBaseUrl(req)}/auth/google/callback`;
+    logAuthRouteDebug({
+      route: "/auth/google/start",
+      computed_redirect_uri: computedRedirectUri
+    });
 
-  res.redirect(googleAuthUrl);
+    const oauthClient = createOauthClient(req);
+    const requestedScopes = normalizeScopes(req.query.scope);
+    const resource = getRequestedResource(req, getResourceUrl(req));
+    const appState = {
+      returnTo: req.query.return_to || "/",
+      clientRedirectUri: req.query.redirect_uri || null,
+      clientState: req.query.state || null,
+      codeChallenge: req.query.code_challenge || null,
+      codeChallengeMethod: req.query.code_challenge_method || "S256",
+      scope: requestedScopes.join(" "),
+      resource,
+      audience: resource,
+      issuedAt: Date.now()
+    };
+
+    const googleAuthUrl = oauthClient.generateAuthUrl({
+      access_type: "offline",
+      scope: GOOGLE_SCOPES,
+      include_granted_scopes: true,
+      prompt: "consent",
+      state: encryptJson(appState)
+    });
+
+    logAuthRouteDebug({
+      route: "/auth/google/start",
+      generated_auth_url: googleAuthUrl
+    });
+
+    return res.redirect(302, googleAuthUrl);
+  } catch (error) {
+    logAuthRouteDebug({
+      route: "/auth/google/start",
+      error_message: error instanceof Error ? error.message : String(error),
+      error_stack: error instanceof Error ? error.stack : String(error)
+    });
+
+    return res.status(500).json({
+      error: "auth_start_failed",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 app.get("/auth/google/callback", async (req, res) => {
@@ -601,6 +651,12 @@ app.get("/auth/google/callback", async (req, res) => {
     successUrl.searchParams.set("auth", "success");
     return res.redirect(successUrl.toString());
   } catch (error) {
+    logAuthRouteDebug({
+      route: "/auth/google/callback",
+      error_message: error instanceof Error ? error.message : String(error),
+      error_stack: error instanceof Error ? error.stack : String(error)
+    });
+
     return res.status(500).json({
       error: "OAuth callback failed.",
       details: error instanceof Error ? error.message : String(error)

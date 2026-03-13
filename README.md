@@ -25,6 +25,11 @@ It exposes these MCP tools:
 - `APP_BASE_URL`
 - `APP_ENCRYPTION_KEY`
 
+Compatibility fallback names also supported:
+
+- `BASE_URL`
+- `SESSION_SECRET`
+
 You can copy `.env.example` locally and fill in your values.
 
 Generate `APP_ENCRYPTION_KEY` as a base64-encoded 32-byte secret. Example:
