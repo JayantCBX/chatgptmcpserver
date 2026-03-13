@@ -1,6 +1,6 @@
-# Google Search Console + GA4 MCP Server for Vercel
+# Marketing Data MCP Server for Vercel
 
-This project is a Vercel-hosted Node.js MCP server for ChatGPT. The Vercel app is the OAuth authorization server for ChatGPT, and it uses Google OAuth 2.0 behind the scenes with read-only scopes only.
+This project is a Vercel-hosted Node.js MCP server for ChatGPT. The Vercel app is the OAuth authorization server for ChatGPT. Google-backed tools use Google OAuth 2.0 behind the scenes, and CallRail-backed tools use a server-side CallRail API token.
 
 It exposes these MCP tools:
 
@@ -8,6 +8,13 @@ It exposes these MCP tools:
 - `query_search_console`
 - `list_ga4_properties`
 - `run_ga4_report`
+- `list_merchant_accounts`
+- `get_merchant_account`
+- `list_merchant_products`
+- `get_merchant_product`
+- `list_callrail_accounts`
+- `list_callrail_companies`
+- `list_callrail_calls`
 
 ## Routes
 
@@ -24,11 +31,16 @@ It exposes these MCP tools:
 - `GOOGLE_CLIENT_SECRET`
 - `APP_BASE_URL`
 - `APP_ENCRYPTION_KEY`
+- `CALLRAIL_API_TOKEN` for CallRail tools
 
 Compatibility fallback names also supported:
 
 - `BASE_URL`
 - `SESSION_SECRET`
+
+Optional:
+
+- `CALLRAIL_API_BASE_URL` to override the default CallRail API base URL (`https://api.callrail.com/v3`)
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -45,6 +57,7 @@ Generate `APP_ENCRYPTION_KEY` as a base64-encoded 32-byte secret. Example:
    - Google Search Console API
    - Google Analytics Data API
    - Google Analytics Admin API
+   - Merchant API
 3. Create OAuth 2.0 credentials for a Web application.
 4. Add this authorized redirect URI:
 
@@ -56,6 +69,19 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 - `https://www.googleapis.com/auth/webmasters.readonly`
 - `https://www.googleapis.com/auth/analytics.readonly`
+- `https://www.googleapis.com/auth/content`
+
+## Merchant Center notes
+
+- Merchant Center tools use the Google Merchant API v1.
+- Google may require the Cloud project to be registered for Merchant API access before Merchant Center requests succeed.
+- The Merchant Center OAuth scope is not read-only; this server exposes only read-only Merchant Center MCP tools.
+
+## CallRail notes
+
+- CallRail tools use `CALLRAIL_API_TOKEN` from the server environment.
+- ChatGPT does not perform a separate CallRail OAuth flow in this setup.
+- `list_callrail_calls` accepts documented CallRail query parameters via the `query` object and also supports `nextPageUrl` from a previous response.
 
 ## Deploy to Vercel
 
@@ -90,5 +116,5 @@ npm start
 - This server keeps OAuth state stateless by encrypting authorization codes and Vercel-issued access and refresh tokens instead of storing them in a database.
 - Keep `APP_ENCRYPTION_KEY` or `SESSION_SECRET` stable across deploys so sessions and tokens remain decryptable.
 - `/mcp` validates only Vercel-issued MCP bearer tokens. It does not accept raw Google tokens directly.
-- Those Vercel-issued tokens include issuer, resource, scope, expiry, and the Google credentials needed for downstream API calls.
+- Those Vercel-issued tokens include issuer, resource, scope, expiry, and the Google credentials needed for downstream Google API calls.
 - The current server-side session store is in-process memory. For stronger persistence across cold starts and regions on Vercel, move session storage to a durable store such as Redis or Vercel KV.

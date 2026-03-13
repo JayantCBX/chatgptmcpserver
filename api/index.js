@@ -7,7 +7,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
-const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE];
+const MERCHANT_CENTER_SCOPE = "https://www.googleapis.com/auth/content";
+const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE];
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -17,8 +18,17 @@ const TOOL_SCOPE_MAP = {
   list_search_console_sites: [SEARCH_CONSOLE_SCOPE],
   query_search_console: [SEARCH_CONSOLE_SCOPE],
   list_ga4_properties: [GA4_SCOPE],
-  run_ga4_report: [GA4_SCOPE]
+  run_ga4_report: [GA4_SCOPE],
+  list_merchant_accounts: [MERCHANT_CENTER_SCOPE],
+  get_merchant_account: [MERCHANT_CENTER_SCOPE],
+  list_merchant_products: [MERCHANT_CENTER_SCOPE],
+  get_merchant_product: [MERCHANT_CENTER_SCOPE]
 };
+const CALLRAIL_TOOL_NAMES = [
+  "list_callrail_accounts",
+  "list_callrail_companies",
+  "list_callrail_calls"
+];
 const sessionStore = globalThis.__googleMcpSessionStore || new Map();
 globalThis.__googleMcpSessionStore = sessionStore;
 
@@ -29,12 +39,16 @@ function requireEnv(name) {
 }
 
 function getBaseUrl(req) {
-  return process.env.APP_BASE_URL || process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
+  const raw = process.env.APP_BASE_URL || process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
   return String(raw).replace(/\/+$/, "");
 }
 
 function getResourceUrl(req) {
   return `${getBaseUrl(req)}/mcp`;
+}
+
+function getCallRailBaseUrl() {
+  return String(process.env.CALLRAIL_API_BASE_URL || "https://api.callrail.com/v3").replace(/\/+$/, "");
 }
 
 function getEncryptionKey() {
@@ -98,6 +112,11 @@ function logAuthRouteDebug(payload) {
 
 function normalizePropertyName(propertyId) {
   return propertyId.startsWith("properties/") ? propertyId : `properties/${propertyId}`;
+}
+
+function normalizeMerchantAccountName(accountName) {
+  const normalized = String(accountName || "").trim();
+  return normalized.startsWith("accounts/") ? normalized : `accounts/${normalized}`;
 }
 
 function normalizeScopes(scopeValue) {
@@ -164,6 +183,25 @@ function extractBearerToken(req) {
     });
   }
   return authHeader.slice("Bearer ".length);
+}
+
+function requireCallRailApiToken() {
+  return requireEnv("CALLRAIL_API_TOKEN");
+}
+
+function appendQueryParams(url, params = {}) {
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item === undefined || item === null || item === "") continue;
+        url.searchParams.append(key, String(item));
+      }
+      continue;
+    }
+    url.searchParams.set(key, String(value));
+  }
+  return url;
 }
 
 function saveSession(sessionId, session) {
@@ -369,6 +407,27 @@ async function callGoogleApi(url, accessToken, options = {}) {
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
+async function callCallRailApi(pathOrUrl, query = {}) {
+  const url = pathOrUrl.startsWith("http")
+    ? new URL(pathOrUrl)
+    : new URL(`${getCallRailBaseUrl()}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`);
+  appendQueryParams(url, query);
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Token token="${requireCallRailApiToken()}"`,
+      Accept: "application/json"
+    }
+  });
+  const rawBody = await response.text();
+  let parsedBody = rawBody;
+  try {
+    parsedBody = rawBody ? JSON.parse(rawBody) : null;
+  } catch {}
+  console.log(JSON.stringify({ type: "callrail_api_debug", url: url.toString(), status: response.status, body: parsedBody }));
+  return { ok: response.ok, status: response.status, body: parsedBody };
+}
+
 function buildToolResult(payload, isError = false, meta) {
   return {
     content: [{ type: "text", text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2) }],
@@ -401,6 +460,14 @@ async function withVerifiedToolAuth(req, requiredScopes, handler) {
       true,
       shouldEmitAuthChallenge(error) ? { "mcp/www_authenticate": getAuthenticateHeader(error) } : undefined
     );
+  }
+}
+
+async function withCallRailTool(handler) {
+  try {
+    return await handler();
+  } catch (error) {
+    return buildToolResult(toToolErrorPayload(error), true);
   }
 }
 
@@ -467,12 +534,59 @@ async function runGa4Report(accessToken, params) {
   });
 }
 
+async function listMerchantAccounts(accessToken, params = {}) {
+  const url = new URL("https://merchantapi.googleapis.com/accounts/v1/accounts");
+  appendQueryParams(url, {
+    pageSize: params.pageSize,
+    pageToken: params.pageToken,
+    filter: params.filter
+  });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+async function getMerchantAccount(accessToken, name) {
+  return callGoogleApi(`https://merchantapi.googleapis.com/accounts/v1/${normalizeMerchantAccountName(name)}`, accessToken, {
+    method: "GET"
+  });
+}
+
+async function listMerchantProducts(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  const url = new URL(`https://merchantapi.googleapis.com/products/v1/${parent}/products`);
+  appendQueryParams(url, {
+    pageSize: params.pageSize,
+    pageToken: params.pageToken
+  });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+async function getMerchantProduct(accessToken, name) {
+  return callGoogleApi(`https://merchantapi.googleapis.com/products/v1/${String(name || "").trim()}`, accessToken, {
+    method: "GET"
+  });
+}
+
+async function listCallRailAccounts(params = {}) {
+  return callCallRailApi("/a.json", params.query);
+}
+
+async function listCallRailCompanies(params) {
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/companies.json`, params.query);
+}
+
+async function listCallRailCalls(params) {
+  if (params.nextPageUrl) {
+    return callCallRailApi(params.nextPageUrl);
+  }
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls.json`, params.query);
+}
+
 function isToolCall(body) {
   return body?.method === "tools/call" && typeof body?.params?.name === "string";
 }
 
 function createServer(req) {
-  const server = new McpServer({ name: "google-search-console-ga4", version: "1.0.0" });
+  const server = new McpServer({ name: "marketing-data-mcp", version: "1.1.0" });
   server.registerTool("list_search_console_sites", {
     title: "List Search Console Sites",
     description: "List the Google Search Console sites accessible to the authenticated user.",
@@ -569,6 +683,138 @@ function createServer(req) {
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
+  server.registerTool("list_merchant_accounts", {
+    title: "List Merchant Center Accounts",
+    description: "List Merchant Center accounts accessible to the authenticated Google user.",
+    inputSchema: {
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional(),
+      filter: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional(),
+      filter: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_merchant_accounts, async ({ googleCredentials }) => {
+      const response = await listMerchantAccounts(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("get_merchant_account", {
+    title: "Get Merchant Center Account",
+    description: "Get a Merchant Center account by account resource name or numeric account ID.",
+    inputSchema: {
+      name: z.string().min(1)
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      name: z.string().min(1)
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_merchant_account, async ({ googleCredentials }) => {
+      const response = await getMerchantAccount(googleCredentials.accessToken, parsed.name);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("list_merchant_products", {
+    title: "List Merchant Center Products",
+    description: "List processed products for a Merchant Center account.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(250).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(250).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_merchant_products, async ({ googleCredentials }) => {
+      const response = await listMerchantProducts(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("get_merchant_product", {
+    title: "Get Merchant Center Product",
+    description: "Get a processed Merchant Center product by full resource name, for example accounts/123/products/en~US~sku123.",
+    inputSchema: {
+      name: z.string().min(1)
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      name: z.string().min(1)
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_merchant_product, async ({ googleCredentials }) => {
+      const response = await getMerchantProduct(googleCredentials.accessToken, parsed.name);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("list_callrail_accounts", {
+    title: "List CallRail Accounts",
+    description: "List CallRail accounts visible to the configured CallRail API token.",
+    inputSchema: {
+      query: z.record(z.any()).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      query: z.record(z.any()).optional()
+    }).parse(params);
+    return withCallRailTool(async () => {
+      const response = await listCallRailAccounts(parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("list_callrail_companies", {
+    title: "List CallRail Companies",
+    description: "List CallRail companies for an account visible to the configured CallRail API token.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      query: z.record(z.any()).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      query: z.record(z.any()).optional()
+    }).parse(params);
+    return withCallRailTool(async () => {
+      const response = await listCallRailCompanies(parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("list_callrail_calls", {
+    title: "List CallRail Calls",
+    description: "List CallRail calls for an account. Pass documented API query params via query, or pass nextPageUrl from a previous response for relative pagination.",
+    inputSchema: {
+      accountId: z.string().min(1).optional(),
+      nextPageUrl: z.string().url().optional(),
+      query: z.record(z.any()).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1).optional(),
+      nextPageUrl: z.string().url().optional(),
+      query: z.record(z.any()).optional()
+    }).parse(params);
+    if (!parsed.accountId && !parsed.nextPageUrl) {
+      return buildToolResult({
+        error: "invalid_request",
+        error_description: "Provide accountId or nextPageUrl."
+      }, true);
+    }
+    return withCallRailTool(async () => {
+      const response = await listCallRailCalls(parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
   return server;
 }
 
@@ -580,14 +826,14 @@ app.use(express.urlencoded({ extended: false }));
 app.get("/", (req, res) => {
   const baseUrl = getBaseUrl(req);
   res.json({
-    name: "google-search-console-ga4-mcp",
+    name: "marketing-data-mcp",
     mcpUrl: `${baseUrl}/mcp`,
     oauthStartUrl: `${baseUrl}/auth/google/start`,
     oauthCallbackUrl: `${baseUrl}/auth/google/callback`,
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
     scopes: GOOGLE_SCOPES,
-    tools: Object.keys(TOOL_SCOPE_MAP)
+    tools: [...Object.keys(TOOL_SCOPE_MAP), ...CALLRAIL_TOOL_NAMES]
   });
 });
 
@@ -628,7 +874,7 @@ app.get("/auth/google/start", (req, res) => {
 
     const googleAuthUrl = oauthClient.generateAuthUrl({
       access_type: "offline",
-      scope: GOOGLE_SCOPES,
+      scope: requestedScopes,
       include_granted_scopes: true,
       prompt: "consent",
       state: encryptJson(appState)
