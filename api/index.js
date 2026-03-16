@@ -431,7 +431,14 @@ function extractBearerToken(req) {
 }
 
 function requireCallRailApiToken() {
-  return requireEnv("CALLRAIL_API_TOKEN");
+  const token =
+    process.env.CALLRAIL_API_TOKEN ||
+    process.env.CALLRAIL_TOKEN ||
+    process.env.CALLRAIL_API_KEY;
+  if (!token) {
+    throw new Error("CallRail API token is not configured. Set CALLRAIL_API_TOKEN, CALLRAIL_TOKEN, or CALLRAIL_API_KEY.");
+  }
+  return token;
 }
 
 function requireGoogleAdsDeveloperToken() {
@@ -1135,18 +1142,20 @@ function buildMarketingPresetCatalog() {
   };
 }
 
-function getEnvironmentPresence() {
-  return {
-    GOOGLE_CLIENT_ID: Boolean(process.env.GOOGLE_CLIENT_ID),
-    GOOGLE_CLIENT_SECRET: Boolean(process.env.GOOGLE_CLIENT_SECRET),
-    APP_BASE_URL: Boolean(process.env.APP_BASE_URL || process.env.BASE_URL),
-    APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET),
-    GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
-    CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
-    CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
-  };
-}
+  function getEnvironmentPresence() {
+    return {
+      GOOGLE_CLIENT_ID: Boolean(process.env.GOOGLE_CLIENT_ID),
+      GOOGLE_CLIENT_SECRET: Boolean(process.env.GOOGLE_CLIENT_SECRET),
+      APP_BASE_URL: Boolean(process.env.APP_BASE_URL || process.env.BASE_URL),
+      APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET),
+      GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
+      GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+      CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
+      CALLRAIL_TOKEN: Boolean(process.env.CALLRAIL_TOKEN),
+      CALLRAIL_API_KEY: Boolean(process.env.CALLRAIL_API_KEY),
+      CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
+    };
+  }
 
 async function buildIntegrationDebugPayload(req) {
   const env = getEnvironmentPresence();
@@ -2343,7 +2352,9 @@ app.get("/auth/google/start", (req, res) => {
         APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY),
         GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
         GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
-        CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN)
+        CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
+        CALLRAIL_TOKEN: Boolean(process.env.CALLRAIL_TOKEN),
+        CALLRAIL_API_KEY: Boolean(process.env.CALLRAIL_API_KEY)
       }
     });
 
