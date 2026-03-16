@@ -66,12 +66,14 @@ It exposes these MCP tools:
 - `APP_BASE_URL`
 - `APP_ENCRYPTION_KEY`
 - `GOOGLE_ADS_DEVELOPER_TOKEN` for Google Ads tools
-- `CALLRAIL_API_TOKEN` for CallRail tools
+- one of `CALLRAIL_API_TOKEN`, `CALLRAIL_TOKEN`, or `CALLRAIL_API_KEY` for CallRail tools
 
 Compatibility fallback names also supported:
 
 - `BASE_URL`
 - `SESSION_SECRET`
+- `CALLRAIL_TOKEN`
+- `CALLRAIL_API_KEY`
 
 Optional:
 
@@ -147,7 +149,7 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 ## CallRail notes
 
-- CallRail tools use `CALLRAIL_API_TOKEN` from the server environment.
+- CallRail tools use `CALLRAIL_API_TOKEN`, `CALLRAIL_TOKEN`, or `CALLRAIL_API_KEY` from the server environment.
 - ChatGPT does not perform a separate CallRail OAuth flow in this setup.
 - `list_callrail_calls`, `get_callrail_call_summary`, `get_callrail_call_timeseries`, `list_callrail_trackers`, and `get_callrail_resource` accept documented CallRail query parameters via the `query` object.
 - Call transcripts, call recordings, landing pages, tags, channels, sources, and attribution fields depend on what the CallRail API returns for the selected endpoint and the data available in the account.
